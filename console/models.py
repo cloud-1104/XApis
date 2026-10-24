@@ -79,6 +79,52 @@ class LoginAccount(Model):
     model_config = ConfigDict(extra="forbid")
 
 
+class ChatRelay(Model):
+    context_id: str = Field(min_length=20, max_length=100)
+    url: str = Field(min_length=8, max_length=500)
+    method: Literal["GET", "POST"]
+    headers: dict[str, str] = Field(default_factory=dict, max_length=10)
+    body: str = Field(default="", max_length=1_400_000)
+
+
+class ChatPassword(Model):
+    pin: str = Field(min_length=4, max_length=128)
+    model_config = ConfigDict(extra="forbid")
+
+
+class ChatSend(Model):
+    conversation_id: str = Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9:-]+$")
+    message_id: str = Field(pattern=r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+    encoded_message_create_event: str = Field(min_length=4, max_length=100_000, pattern=r"^[A-Za-z0-9+/]+={0,2}$")
+    encoded_message_event_signature: str = Field(min_length=4, max_length=10_000, pattern=r"^[A-Za-z0-9+/]+={0,2}$")
+
+
+class ChatParticipantKey(Model):
+    user_id: str = Field(pattern=r"^[0-9]{1,30}$")
+    public_key_version: str = Field(pattern=r"^[0-9]{1,30}$")
+    encrypted_conversation_key: str = Field(min_length=4, max_length=10_000, pattern=r"^[A-Za-z0-9+/]+={0,2}$")
+
+
+class ChatSignature(Model):
+    signing_public_key: str = Field(min_length=4, max_length=1000, pattern=r"^[A-Za-z0-9+/]+={0,2}$")
+    public_key_version: str = Field(pattern=r"^[0-9]{1,30}$")
+    signature_version: str = Field(pattern=r"^[0-9]{1,10}$")
+    signature: str = Field(min_length=4, max_length=1000, pattern=r"^[A-Za-z0-9+/]+={0,2}$")
+
+
+class ChatKeyAction(Model):
+    message_id: str = Field(pattern=r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+    encoded_message_event_detail: str = Field(min_length=4, max_length=100_000, pattern=r"^[A-Za-z0-9+/]+={0,2}$")
+    message_event_signature: ChatSignature
+
+
+class ChatKeySetup(Model):
+    conversation_id: str = Field(pattern=r"^[0-9]{1,30}:[0-9]{1,30}$")
+    conversation_key_version: str = Field(pattern=r"^[0-9]{1,30}$")
+    conversation_participant_keys: list[ChatParticipantKey] = Field(min_length=1, max_length=2)
+    action_signatures: list[ChatKeyAction] = Field(min_length=1, max_length=1)
+
+
 class AIConfig(Model):
     base_url: str = Field(min_length=8, max_length=500)
     model: str = Field(min_length=1, max_length=100)

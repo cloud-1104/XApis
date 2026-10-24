@@ -70,3 +70,4 @@ cookies*.json
 session*.json
 castle_profile*.json
 /docs/captures/
+/console/static/vendor/

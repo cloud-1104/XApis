@@ -158,7 +158,7 @@ CONSOLE_PRIVATE_AI_HOSTS=host.docker.internal,ollama
 | 文章嵌入贴文 | Markdown 独占一行的 X 贴文链接 |
 | 文章插图 | 先上传图片，正文写 `![](media:上传ID)`；第一张媒体可作为封面 |
 | X Chat 设置、收件箱、会话、成员、公钥 | 私信、API 工具箱；敏感令牌隐藏 |
-| 私信发送 | 原库尚未实现，控制台不提供虚假的发送按钮 |
+| X Chat 文字私信 | Cookie 网页接口、密码解锁、会话分页、加密文字发送；养护期只读 |
 
 底层的 INIT / APPEND / FINALIZE / STATUS 等媒体步骤由上传流程统一执行。批量翻页辅助方法通过界面的“加载更多”实现，避免无界抓取。GraphQL / Castle 注册表维护仍保留原 CLI；它是 SDK 维护工具，不在普通用户页面暴露写入运行文件的入口。
 
@@ -272,3 +272,15 @@ docker compose -f compose.yaml -f compose.local.yaml up -d --build --wait
 ```
 
 此时 `http://localhost:8000` 和 `http://localhost:8765` 访问同一个 Docker 工作台。已有预览数据可通过上文的 MySQL 备份/恢复命令迁移，账号养护起点、发布台账和登录会话会保留。新部署仍通过初始化页面创建管理员，不包含任何预置账号密码。
+
+## X Chat 私信
+
+私信页可保存已经在 X Chat 设置的聊天密码，密码与 Cookie 一样使用部署密钥加密后存入 MySQL。状态接口只返回是否已保存；点击解锁时，受登录和 CSRF 保护的接口把密码交给当前页面的独立 Worker，用于恢复聊天密钥。控制台不创建或重置 X 的聊天密码。保存或清除操作仅修改本地保存值。
+
+恢复请求经 Go 网关和账号绑定代理访问 X 的密钥服务器；后端校验服务器地址、会话版本、时效和请求大小，并使用 X 签发的对应服务器授权。密码错误会显示剩余机会，不自动重试。浏览器 CSP 禁止直接请求外网。私钥仅留在 Worker 内存，离开私信页、切换账号、退出登录后销毁；普通接口和日志不返回密码、令牌或私钥。
+
+解锁后可读取收件箱、加载更多会话、查看历史消息，输入 X 用户名打开会话。页面可见、已解锁且未编辑消息时，每 30 秒刷新。发送文字在浏览器内加密并签名，后端只接收密文，使用 `SendMessageCreateMutation` 网页接口发送。新的一对一会话使用 `AddEncryptedConversationKeysMutation` 提交加密会话密钥；已有会话禁止覆盖密钥。发送结果需通过返回事件的解密和签名验证，才能显示确认。
+
+养护期禁止发送私信和建立新会话密钥，但允许读取。发送请求 ID 和结果状态持久化到 MySQL，用于阻止重复提交；不保存消息明文、密文或恢复私钥。超时和结果不明时不自动重发，先在 X 核对。审计日志仅记录保存密码、密钥提交和发送阶段的结果，不记录消息内容。媒体附件暂显示为占位提示，当前发送界面仅支持文字；消息请求审批及群成员管理仍需在 X 完成。
+
+浏览器加密组件固定在 `frontend/vendor/README.md` 记录的官方源码版本。开发环境先运行 `npm ci --prefix frontend --ignore-scripts` 和 `npm run build --prefix frontend`；Docker 构建自动完成。测试：`node --test tests/test_chat_crypto.mjs`，以及测试 MySQL 环境中的 `pytest tests/test_chat.py`。

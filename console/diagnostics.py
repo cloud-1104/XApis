@@ -12,7 +12,7 @@ from http.cookies import SimpleCookie
 from console.store import uid, encode
 
 SENSITIVE = re.compile(
-    r"password|passwd|cookie|authorization|secret|token|csrf|email|phone|date_of_birth",
+    r"password|passwd|passcode|(?:^|_)pin(?:$|_)|private.?key|cookie|authorization|secret|token|csrf|email|phone|date_of_birth",
     re.I,
 )
 

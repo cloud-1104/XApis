@@ -1,5 +1,6 @@
 "use strict";
 import {postId, readRoute, routeHash, appendUnique} from "./navigation.mjs";
+import {ChatVault} from "./chat-client.mjs";
 const paths = {
   home: "M3 10 12 3l9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z",
   search: "m21 21-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0",
@@ -83,6 +84,8 @@ const S = {
   groups: [],
   maintenance: [],
   maintenanceTimer: null,
+  chat: null,
+  chatVault: null,
   rules: [],
   jobs: [],
   posts: [],
@@ -158,6 +161,7 @@ async function api(path, options = {}) {
   }
   if (!res.ok) {
     if (res.status === 401 && S.user) {
+      S.chatVault?.dispose(); S.chatVault = null; S.chat = null;
       S.user = null;
       renderLogin(false);
     }
@@ -277,6 +281,7 @@ async function refreshBase() {
 }
 async function navigate(page, options = {}) {
   clearTimeout(S.maintenanceTimer);
+  if (page !== "messages" || S.chat?.account !== S.account) { S.chatVault?.dispose(); S.chatVault = null; S.chat = null; }
   if (!titles[page]) page = "home";
   if (page === "post" && !postId(S.detailId)) page = "home";
   S.page = page;
@@ -481,10 +486,129 @@ async function loadPage(version) {
   }
   if (S.page === "messages") {
     if (needAccount()) return;
-    view.innerHTML = `<div class="page-pad"><div class="notice">现有 XApis 支持 X Chat 读取。加密消息可能需要在 X 设置 passcode；当前不支持发送或解密私信。</div><div class="row wrap"><button class="secondary" data-action="chat-read" data-type="chat_inbox">${icon("mail")}读取收件箱</button><button class="secondary" data-action="chat-read" data-type="chat_settings">私信设置</button></div><form data-form="chat-conversation" class="row conversation-form"><input class="control" name="conversation_id" placeholder="会话 ID" aria-label="会话 ID" required><button class="secondary no-wrap">读取会话</button></form><div id="chat-results">${empty("连接你的对话", "点击读取收件箱，查看 X 返回的会话数据。敏感令牌不会发送到浏览器。", "mail")}</div></div>`;
-    return;
+    S.chat ||= {account: S.account, unlocked: false, has_saved_pin: false, ready: false, busy: false, inbox: null, inboxLoading: false, error: "", inboxError: ""};
+    view.innerHTML = messagesPage();
+    const status = await api(`/accounts/${S.account}/chat/status`);
+    if (version !== S.version) return;
+    Object.assign(S.chat, status, {ready: true});
+    renderChatSecurity();
+    return refreshChatInbox();
   }
 }
+function messagesPage() {
+  return `<div class="page-pad chat-workspace"><div class="page-intro"><div><h2>你的私信会话</h2><p>会话读取与聊天密码，集中在这里管理。</p></div><a class="secondary" href="https://x.com/i/chat" target="_blank" rel="noopener noreferrer">在 X 打开 ↗</a></div><section class="panel" id="chat-security">${loading()}</section><section class="panel" id="chat-inbox">${loading()}</section><div class="footnote">${icon("shield")}<span>私信在浏览器中加密和解密，通过账号 Cookie 与绑定代理收发。页面打开并解锁时每 30 秒刷新；养护期只读。当前支持文字私信。</span></div></div>`;
+}
+function renderChatSecurity() {
+  if (S.page !== "messages" || !S.chat || !$("#chat-security")) return;
+  const c = S.chat;
+  $("#chat-security").innerHTML = `<div class="row between"><div class="row">${icon("shield")}<h3>X Chat 聊天密码</h3></div>${badge(c.unlocked ? "本次会话已解锁" : "聊天已锁定", c.unlocked ? "" : "gray")}</div><p class="chat-help">填写已经在 X Chat 设置的密码，用于恢复聊天密钥。它与控制台登录密码不同。</p><form data-form="chat-password" class="chat-pin-form"><div class="field"><label for="chat-pin">聊天密码${c.has_saved_pin ? " · 已加密保存" : ""}</label><input id="chat-pin" name="pin" type="password" inputmode="numeric" autocomplete="off" minlength="4" maxlength="128" placeholder="${c.has_saved_pin ? "输入新值可替换已保存的密码" : "输入已在 X Chat 设置的密码"}" required ${c.busy ? "disabled" : ""}></div><button class="secondary" type="submit" ${c.busy ? "disabled" : ""}>保存密码</button></form><div class="chat-controls">${c.unlocked ? '<button class="secondary" data-action="chat-lock">锁定聊天</button>' : `<button class="primary" data-action="chat-unlock" ${!c.has_saved_pin || c.busy ? "disabled" : ""}>${icon("shield")}${c.busy ? "正在解锁…" : "使用已保存密码解锁"}</button>`}${c.has_saved_pin ? `<button class="text-btn muted" data-action="chat-password-clear" ${c.busy ? "disabled" : ""}>清除已保存的密码</button>` : ""}</div>${c.progress ? `<p class="chat-help" role="status" aria-live="polite">${esc(c.progress)}</p>` : ""}${c.error ? `<div class="form-error show" role="alert">${esc(c.error)}</div>` : ""}<p class="tiny muted chat-help">密码加密存储在 MySQL，不展示原值。恢复的密钥仅保留在当前浏览器页面；离开私信页后自动锁定。</p>`;
+}
+function renderChatInbox() {
+  if (S.page !== "messages" || !S.chat || !$("#chat-inbox")) return;
+  const c = S.chat, inbox = c.inbox;
+  const draft = $("#chat-text");
+  if (draft && draft.dataset.conversation === c.selected) c.draft = draft.value;
+  let body = c.inboxLoading && !inbox ? loading() : "";
+  if (c.inboxError) body += `<div class="form-error show">${esc(c.inboxError)}</div>`;
+  if (inbox) {
+    if (!inbox.item_count && !inbox.conversations.length) body += empty("暂无私信会话", "输入对方的 X 用户名可以打开会话。", "mail");
+    else body += `<div class="chat-conversation-list">${inbox.conversations.map(t => `<button class="chat-conversation ${t.id === c.selected ? "selected" : ""}" data-action="chat-open" data-id="${esc(t.id)}" ${c.sending ? "disabled" : ""}>${avatar(t.title)}<span class="grow"><b>${esc(t.title)}</b><small>${esc(t.participants?.map(p => p.handle ? "@" + p.handle : p.name).join(" · ") || "加密会话")}</small></span>${icon("chevron")}</button>`).join("")}</div>`;
+    if (inbox.unrecognized_items) body += `<div class="notice">${inbox.unrecognized_items} 条数据尚未识别，请在 X 核对。</div>`;
+    if (inbox.message_requests) body += `<p class="chat-help">X 返回 ${inbox.message_requests} 条消息请求，请在 X 中处理。</p>`;
+    if (inbox.cursor) body += `<button class="secondary chat-more" data-action="chat-inbox-more" ${c.inboxLoading ? "disabled" : ""}>加载更多会话</button>`;
+  }
+  $("#chat-inbox").innerHTML = `<div class="row between"><h3>收件箱${inbox ? ` · ${inbox.conversations.length} 个会话` : ""}</h3><button class="secondary" data-action="chat-refresh" ${c.inboxLoading || c.sending ? "disabled" : ""}>${icon("refresh")}刷新</button></div><form data-form="chat-recipient" class="chat-recipient"><input name="handle" aria-label="对方 X 用户名" placeholder="输入 @用户名" maxlength="16" required><button class="secondary" ${c.sending ? "disabled" : ""}>打开会话</button>${errorSlot()}</form>${inbox ? `<p class="tiny muted chat-help">最近同步 ${date(inbox.synced_at)}</p>` : ""}${body}<div id="chat-thread"></div>`;
+  renderChatThread();
+}
+function renderChatThread() {
+  const c = S.chat;
+  if (!c || !$("#chat-thread") || !c.selected) return;
+  const draft = $("#chat-text");
+  if (draft && draft.dataset.conversation === c.selected) c.draft = draft.value;
+  const thread = c.inbox?.conversations.find(t => t.id === c.selected);
+  const own = S.accounts.find(a => a.id === S.account)?.x_id;
+  const sender = id => thread?.participants?.find(p => p.x_id === id)?.name || (id === own ? "我" : "聊天成员");
+  const canSend = c.unlocked && c.can_write && !c.sending && !c.threadLoading && !c.sendUncertain;
+  $("#chat-thread").innerHTML = `<div class="chat-thread"><div class="row between"><h3>${esc(thread?.title || "会话内容")}</h3><button class="text-btn" data-action="chat-thread-refresh" ${c.threadLoading || c.sending ? "disabled" : ""}>刷新消息</button></div>${c.has_more && c.before ? `<button class="secondary chat-more" data-action="chat-history" ${c.threadLoading || c.sending ? "disabled" : ""}>加载更早消息</button>` : ""}${c.threadLoading && !c.messages?.length ? loading() : ""}${c.threadError ? `<div class="notice">${esc(c.threadError)}</div>` : ""}<div class="chat-messages">${(c.messages || []).map(m => `<article class="chat-bubble ${m.sender_id === own ? "own" : ""}"><div class="tiny muted">${esc(sender(m.sender_id))} · ${date(m.created)}</div><p>${esc(m.text)}</p></article>`).join("") || (!c.threadLoading ? `<p class="chat-help">${c.system_event_count ? '聊天密钥和设置已同步，暂时还没有聊天消息。' : '暂时还没有聊天消息。'}</p>` : "")}</div>${c.failed_count ? `<p class="chat-help">${c.failed_count} 条事件未通过解密或签名校验。</p>` : ""}${c.diagnostic ? `<details class="chat-help"><summary>解密诊断</summary>${esc(c.diagnostic)}</details>` : ""}<form data-form="chat-send" class="chat-compose"><textarea id="chat-text" name="text" data-conversation="${esc(c.selected)}" aria-label="私信内容" placeholder="${!c.can_write ? "养护期只读，结束后可发送私信" : !c.unlocked ? "请先解锁聊天" : "写一条私信…"}" maxlength="10000" required ${!canSend ? "disabled" : ""}>${esc(c.draft || "")}</textarea>${c.sendError ? `<div class="form-error show">${esc(c.sendError)}</div>` : ""}${errorSlot()}<div class="row between"><span class="tiny muted">${c.sendNote ? esc(c.sendNote) : "端到端加密 · 文字消息"}</span><button class="primary" ${!canSend ? "disabled" : ""}>${c.sending ? "正在发送…" : "发送私信"}</button></div></form></div>`;
+}
+async function refreshChatInbox(more = false) {
+  const c = S.chat, account = S.account;
+  if (!c || c.inboxLoading || c.sending) return;
+  c.inboxLoading = true; c.inboxError = "";
+  const cursor = more ? c.inbox?.cursor : null;
+  try {
+    const result = await api(`/accounts/${account}/chat/inbox${cursor ? "?cursor=" + encodeURIComponent(cursor) : ""}`);
+    if (S.chat !== c) return;
+    if (more) result.conversations = [...new Map([...c.inbox.conversations,...result.conversations].map(t => [t.id,t])).values()];
+    else if (c.selected && !result.conversations.some(t => t.id === c.selected)) {
+      const selected = c.inbox?.conversations.find(t => t.id === c.selected);
+      if (selected) result.conversations.push(selected);
+    }
+    c.inbox = result;
+  } catch (e) { if (S.chat === c) c.inboxError = e.message; }
+  finally { if (S.chat === c) { c.inboxLoading = false; renderChatInbox(); } }
+}
+async function unlockChat() {
+  const c = S.chat;
+  if (!c || c.busy) return;
+  c.busy = true; c.error = ""; c.progress = "正在准备解锁"; renderChatSecurity();
+  S.chatVault?.dispose();
+  const vault = new ChatVault(S.account, S.csrf, text => { if (S.chat === c) { c.progress = text; renderChatSecurity(); } });
+  S.chatVault = vault;
+  try {
+    const result = await vault.unlock();
+    if (S.chat !== c) { vault.dispose(); return; }
+    c.unlocked = result.unlocked;
+    c.progress = "聊天密钥已恢复，并确认属于当前 X 账号。";
+  } catch (e) {
+    vault.dispose();
+    if (S.chat === c) { c.error = e.message + (e.diagnostic ? " 诊断：" + e.diagnostic : ""); c.unlocked = false; }
+  } finally { if (S.chat === c) { c.busy = false; renderChatSecurity(); renderChatInbox(); } }
+}
+async function openChatConversation(id, more = false) {
+  const c = S.chat, account = S.account, vault = S.chatVault;
+  if (!c || c.sending || c.threadLoading) return;
+  const changed = c.selected !== id;
+  if (changed) Object.assign(c,{messages:[],draft:"",before:null,key_before:null,has_more:false,sendError:"",sendUncertain:false,sendNote:"",diagnostic:""});
+  c.selected = id; c.threadError = "";
+  if (!c.unlocked || !vault) { c.threadError = "请先使用聊天密码解锁，再读取加密消息。"; renderChatInbox(); return; }
+  c.threadLoading = true;
+  if (changed) renderChatInbox(); else renderChatThread();
+  try {
+    const params = new URLSearchParams();
+    if (more && c.before) params.set("before", c.before);
+    if (more && c.key_before) params.set("key_before", c.key_before);
+    const result = await api(`/accounts/${account}/chat/conversations/${encodeURIComponent(id)}?${params}`);
+    if (S.chat !== c) return;
+    const conversation = c.inbox?.conversations.find(t => t.id === id);
+    const decoded = await vault.decrypt(result.events, conversation?.participant_ids || [], result.page_events);
+    if (S.chat !== c || c.selected !== id) return;
+    const messages = [...new Map([...(c.messages || []),...decoded.messages].map(m => [m.id,m])).values()].sort((a,b) => (a.created || 0)-(b.created || 0));
+    const prior = c.before;
+    Object.assign(c,decoded,{messages,before:result.before || decoded.before,system_event_count:result.system_event_count || 0});
+    c.has_more = result.has_more && !!c.before && (!more || c.before !== prior);
+    if (result.has_more && !c.has_more) c.threadError = "历史消息游标未推进，已停止翻页；请在 X 核对。";
+  } catch (e) { if (S.chat === c) c.threadError = e.message; }
+  finally { if (S.chat === c) { c.threadLoading = false; renderChatThread(); } }
+}
+async function sendChatMessage(text) {
+  const c = S.chat, vault = S.chatVault;
+  if (!c?.unlocked || !vault) throw new Error("请先解锁聊天");
+  if (!c.can_write || c.sending || c.threadLoading || c.sendUncertain) throw new Error("当前不能发送私信，请检查养护状态和上一条消息的结果");
+  c.sending = true; c.sendError = ""; c.draft = text; c.sendNote = "";
+  renderChatThread();
+  try {
+    const conversation = c.inbox?.conversations.find(t => t.id === c.selected);
+    const result = await vault.send(c.selected,text,conversation?.participant_ids || []);
+    if (S.chat !== c) return;
+    c.messages = [...new Map([...(c.messages || []),...result.messages].map(m => [m.id,m])).values()];
+    c.draft = ""; const field = $("#chat-text"); if (field) field.value = "";
+    c.sendNote = "X 已确认消息";
+  } catch(e) {
+    if (S.chat === c) { c.sendError = e.message; c.sendUncertain = true; }
+  } finally { if (S.chat === c) { c.sending = false; renderChatThread(); } }
+}
+
 function accountsPage() {
   return `<div class="page-pad"><div class="page-intro"><div><h2>你的账号，一目了然</h2><p>每个账号绑定独立代理，再登录 X。<br><button class="text-btn" data-page="maintenance">养护总览</button> · <button class="text-btn" data-page="keywords">关键词目录</button></p></div><button class="primary" data-action="add-account">${icon("plus")}添加账号</button></div>${S.accounts.map((a) => `<div class="card"><div class="row">${avatar(a.name, a.avatar, "large")}<div class="grow"><h3>${esc(a.name)}</h3><p>${a.handle ? "@" + esc(a.handle) : "等待登录验证"}</p></div>${badge(a.status === "connected" ? "已连接" : a.status === "logging_in" ? "登录中" : "待登录", a.status === "connected" ? "" : "orange")}</div><div class="proxy-path">${icon("shield")}<span>${esc(a.proxy)}</span></div>${policyCard(a)}<div class="job-meta">Cookie 同步：${date(a.cookie_updated)} · Go 网关 → 专属代理 → X</div><div class="actions"><button data-action="login-account" data-id="${a.id}">${a.status === "connected" ? "重新登录 / 更新会话" : "登录 X"}</button><button data-action="change-proxy" data-id="${a.id}">更换代理</button><button data-action="proxy-test" data-id="${a.id}">测试代理</button><button data-action="login-logs" data-id="${a.id}">登录日志</button><button data-action="configure-maintenance" data-id="${a.id}">养护配置</button>${a.status === "connected" ? `<button data-action="switch-mine" data-id="${a.id}">查看贴文</button>` : ""}<button class="danger" data-action="delete-account" data-id="${a.id}">移除账号</button></div></div>`).join("") || empty("连接你的第一个 X 账号", "先保存账号名称和代理，再使用账密登录或导入现有 Cookie。", "users")}<div class="notice">${icon("shield")}账号 Cookie 和代理密码加密存储。代理变更后需要重新登录，自动化会暂停，排期会转回草稿。</div></div>`;
 }
@@ -541,7 +665,7 @@ function settingsPage() {
     )}</select><small>当服务报告参数不支持时，可根据服务商文档切换。</small></div></details>${errorSlot()}<div class="form-footer"><span class="tiny muted">API 密钥加密保存，不会返回浏览器。</span><button class="primary">保存 AI 配置</button></div></form></section><section class="panel"><div class="section-heading"><h3>工作台功能</h3></div><div class="shortcut-grid"><button class="secondary" data-page="maintenance">${icon("shield")}账号养护</button><button class="secondary" data-page="keywords">${icon("bookmark")}关键词目录</button><button class="secondary" data-page="sources">${icon("globe")}热点来源</button><button class="secondary" data-page="rules">${icon("bolt")}自动化任务</button><button class="secondary" data-page="articles">${icon("article")}文章管理</button><button class="secondary" data-page="tools">${icon("code")}API 工具箱</button><button class="secondary" data-page="messages">${icon("mail")}私信</button></div></section><section class="panel security-panel"><div class="section-heading"><h3>账户与安全</h3></div><div class="row wrap"><button class="text-btn" data-action="password">修改登录密码</button><button class="text-btn" data-action="audit">查看操作日志</button><button class="text-btn danger" data-action="logout">退出登录</button></div>${S.user.role === "admin" ? `<div class="divider"></div><div class="row between"><h3>工作台用户</h3><button class="secondary" data-action="add-user">添加用户</button></div><div class="scroll-table"><table><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody>${S.users.map((u) => `<tr><td>${esc(u.username)}</td><td>${u.role === "admin" ? "管理员" : "成员"}</td><td>${u.disabled ? "已停用" : "正常"}</td><td><button class="text-btn" data-action="edit-user" data-id="${u.id}">管理</button></td></tr>`).join("")}</tbody></table></div><p class="small muted">每位用户的 X 账号、AI 配置和内容独立隔离。</p>` : ""}</section></div>`;
 }
 function toolsPage() {
-  return `<div class="page-pad"><div class="page-intro"><div><h2>能力探索器</h2><p>详情、评论、文章及 X Chat 的结构化读取。发布与互动请使用对应页面。</p></div></div><form class="panel" data-form="explorer"><div class="field"><label for="operation">接口能力</label><select name="operation" id="operation">${S.capabilities.reads.map((r) => `<option value="${r.id}">${esc(r.label)}</option>`).join("")}</select></div><div id="explorer-fields"></div>${errorSlot()}<button class="primary">执行读取</button></form><div id="explorer-result"></div><div class="notice">已接入：时间线、搜索、自己的贴文、详情与评论、用户资料、发帖/回复/引用、长帖、串文、点赞/转帖/书签、关注、媒体上传、文章草稿与发布、X Chat 读取。<br>私信发送尚未由原 SDK 实现。</div></div>`;
+  return `<div class="page-pad"><div class="page-intro"><div><h2>能力探索器</h2><p>详情、评论、文章及 X Chat 的结构化读取。发布与互动请使用对应页面。</p></div></div><form class="panel" data-form="explorer"><div class="field"><label for="operation">接口能力</label><select name="operation" id="operation">${S.capabilities.reads.map((r) => `<option value="${r.id}">${esc(r.label)}</option>`).join("")}</select></div><div id="explorer-fields"></div>${errorSlot()}<button class="primary">执行读取</button></form><div id="explorer-result"></div><div class="notice">已接入：时间线、搜索、自己的贴文、详情与评论、用户资料、发帖/回复/引用、长帖、串文、点赞/转帖/书签、关注、媒体上传、文章草稿与发布、X Chat 读取。<br>文字私信可在私信页解锁后收发，养护期仅可读取。</div></div>`;
 }
 async function boot() {
   try {
@@ -1217,17 +1341,29 @@ async function handleAction(action, el) {
     toast("文章操作完成");
     return;
   }
-  if (action === "chat-read") {
-    const data = await api(`/accounts/${S.account}/explore`, {
-      method: "POST",
-      body: { operation: type, params: {} },
-    });
-    $("#chat-results").innerHTML =
-      `<h3>会话数据</h3><pre class="mono">${esc(JSON.stringify(data, null, 2))}</pre>`;
+  if (action === "chat-refresh") { await refreshChatInbox(); if (S.chat?.selected) await openChatConversation(S.chat.selected); return; }
+  if (action === "chat-inbox-more") return refreshChatInbox(true);
+  if (action === "chat-history") return openChatConversation(S.chat.selected,true);
+  if (action === "chat-thread-refresh") return openChatConversation(S.chat.selected);
+  if (action === "chat-unlock") return unlockChat();
+  if (action === "chat-lock") {
+    S.chatVault?.dispose(); S.chatVault = null;
+    Object.assign(S.chat,{unlocked:false,messages:null,draft:"",progress:"聊天已锁定",diagnostic:""});
+    renderChatSecurity(); renderChatInbox();
     return;
   }
+  if (action === "chat-password-clear") {
+    await api(`/accounts/${S.account}/chat/password`, {method: "DELETE"});
+    S.chatVault?.dispose(); S.chatVault = null;
+    Object.assign(S.chat, {has_saved_pin: false, unlocked: false, messages: null});
+    renderChatSecurity(); renderChatInbox();
+    toast("已清除控制台保存的聊天密码；X 的聊天密码未改变");
+    return;
+  }
+  if (action === "chat-open") return openChatConversation(id);
   if (action === "logout") {
     await api("/auth/logout", { method: "POST" });
+    S.chatVault?.dispose(); S.chatVault = null; S.chat = null;
     S.user = null;
     S.csrf = "";
     renderLogin(false);
@@ -1503,19 +1639,33 @@ async function handleForm(form, f, data, submitter) {
       `<pre class="mono">${esc(JSON.stringify(result, null, 2))}</pre>`;
     return;
   }
-  if (kind === "chat-conversation") {
-    const result = await api(`/accounts/${S.account}/explore`, {
-      method: "POST",
-      body: { operation: "chat_conversation", params: data },
-    });
-    $("#chat-results").innerHTML =
-      `<pre class="mono">${esc(JSON.stringify(result, null, 2))}</pre>`;
+  if (kind === "chat-send") return sendChatMessage(data.text);
+  if (kind === "chat-recipient") {
+    const c = S.chat;
+    const conversation = await api(`/accounts/${S.account}/chat/recipient?handle=${encodeURIComponent(data.handle)}`);
+    if (S.chat !== c) return;
+    c.inbox ||= {conversations:[],item_count:0};
+    if (!c.inbox.conversations.some(t => t.id === conversation.id)) c.inbox.conversations.push(conversation);
+    renderChatInbox();
+    return openChatConversation(conversation.id);
+  }
+  if (kind === "chat-password") {
+    const context = S.chat, account = S.account;
+    const pin = data.pin;
+    form.reset();
+    await api(`/accounts/${account}/chat/password`, {method: "PUT", body: {pin}});
+    if (S.chat !== context) return;
+    S.chatVault?.dispose(); S.chatVault = null;
+    Object.assign(context, {has_saved_pin: true, unlocked: false, messages: null, error: ""});
+    renderChatSecurity(); renderChatInbox();
+    toast("聊天密码已加密保存到 MySQL");
     return;
   }
   if (kind === "password") {
     await api("/auth/password", { method: "POST", body: data });
     form.reset();
     closeModal();
+    S.chatVault?.dispose(); S.chatVault = null; S.chat = null;
     S.user = null;
     S.csrf = "";
     renderLogin(false);
@@ -1782,3 +1932,10 @@ function newRequestId() {
     b.toString(16).padStart(2, "0"),
   ).join("");
 }
+
+// Poll only while this unlocked view is visible and idle. Never auto-unlock or retry a send.
+setInterval(async () => {
+  const c = S.chat;
+  if (document.hidden || S.page !== "messages" || !c?.unlocked || c.busy || c.sending || c.inboxLoading || c.threadLoading || document.activeElement?.closest("#chat-inbox form") || $("#chat-text")?.value) return;
+  try { await refreshChatInbox(); if (S.chat === c && c.selected) await openChatConversation(c.selected); } catch {}
+},30000);

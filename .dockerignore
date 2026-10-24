@@ -10,6 +10,7 @@
 .coverage
 data
 node_modules
+**/node_modules
 _tests
 tests
 docs
@@ -23,3 +24,4 @@ castle_profile*.json
 **/*.token
 **/admin-login*.txt
 **/mysql-backup*.json
+console/static/vendor

@@ -18,7 +18,7 @@
 - 登录成功后自动持久化 cookie；默认复用有效 cookie，`--force` 可强制重登。
 - 搜索、作品详情、评论、用户信息、时间线、发帖、回复、删除、点赞、转推、关注。
 - Premium 长推（CreateNoteTweet，按权重自动切换）、Thread、文章（Markdown 一键建草稿 / 发布）。
-- 图片、多图片和视频上传；X Chat 私信读取链路已封装。
+- 图片、多图片和视频上传；X Chat Cookie 网页接口支持收件箱、密码解锁及加密文字私信，养护期只读。
 - 直接调用 Python SDK，也可以使用 `main.py` CLI。
 
 ## 🖥️ Web 自动化运营台（Docker）

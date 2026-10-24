@@ -119,3 +119,11 @@ CREATE TABLE IF NOT EXISTS request_logs (
  response_excerpt TEXT NOT NULL, error_type VARCHAR(100) NOT NULL, created DOUBLE NOT NULL,
  KEY account_time(account_id,created), FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS chat_dispatches (
+ account_id VARCHAR(32) NOT NULL, message_id VARCHAR(36) NOT NULL,
+ payload_hash VARCHAR(64) NOT NULL, operation VARCHAR(20) NOT NULL,
+ state VARCHAR(20) NOT NULL, created DOUBLE NOT NULL, updated DOUBLE NOT NULL,
+ PRIMARY KEY(account_id,message_id),
+ FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+) ENGINE=InnoDB;

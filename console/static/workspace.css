@@ -316,3 +316,38 @@ dialog::backdrop { background: #26374666; backdrop-filter: blur(3px); }
 @media (min-width: 601px) and (max-height: 319px) {
   .sidebar { position: relative; height: 320px; }
 }
+
+.chat-workspace { display: grid; gap: 20px; }
+.chat-workspace .page-intro { margin-bottom: 0; }
+.chat-help { color: var(--muted); line-height: 1.8; font-size: 12px; margin: 12px 0; }
+.chat-pin-form { display: flex; align-items: flex-end; gap: 12px; margin-top: 20px; }
+.chat-pin-form .field { flex: 1; margin: 0; }
+.chat-pin-form > button { flex: 0 0 auto; min-height: 44px; }
+.chat-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.chat-conversation-list { margin-top: 18px; }
+.chat-conversation { display: flex; align-items: center; gap: 12px; width: 100%; padding: 16px 4px; text-align: left; border-bottom: 1px solid var(--line); }
+.chat-conversation small { display: block; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+.chat-thread { border-top: 1px solid var(--line); margin-top: 22px; padding-top: 22px; }
+.chat-bubble { border-radius: 12px; padding: 14px 16px; background: #f3f8fc; margin-top: 14px; }
+.chat-bubble p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; margin-top: 6px; }
+@media (max-width: 440px) { .chat-pin-form { flex-wrap: wrap; } .chat-pin-form .field { flex-basis: 100%; } .chat-pin-form > button { margin-left: auto; } }
+
+.chat-recipient { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.chat-recipient input { flex: 1 1 150px; min-width: 0; }
+.chat-recipient .form-error { width: 100%; }
+.chat-conversation { padding: 14px 12px; border-radius: 10px; }
+.chat-conversation.selected { background: #eef7ff; }
+.chat-conversation .grow { min-width: 0; }
+.chat-messages { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }
+.chat-bubble { max-width: 88%; align-self: flex-start; margin: 0; }
+.chat-bubble.own { align-self: flex-end; background: #e5f3ff; }
+.chat-compose { display: grid; gap: 12px; margin-top: 20px; }
+.chat-compose textarea { width: 100%; min-height: 92px; resize: vertical; box-sizing: border-box; }
+.chat-more { margin-top: 14px; }
+.chat-compose .row { flex-wrap: wrap; gap: 12px; }
+.chat-recipient input, .chat-compose textarea {
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+  background: var(--card, #fff); color: var(--text); font: inherit;
+  outline-offset: 3px;
+}
+.chat-compose textarea:disabled { background: #f6f8fa; color: var(--muted); }

@@ -1,10 +1,11 @@
-"""XApis Web API. Run one worker per data directory; SQLite owns durable state."""
+"""XApis Web API. One scheduler per MySQL database owns durable task state."""
 
 import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 from console.store import IntegrityError
@@ -34,6 +35,8 @@ from console.jobs import Queue
 from console.network import target
 from console.middleware import BodyLimit
 from console import policy
+from console import chat as chat_adapter
+from x_apis.x_dm_api import XChatAPI
 from console.cookies import hook as cookie_hook
 from console.diagnostics import LoginTrace, sanitize
 from utils.x_util import tweet_weight, parse_tweet_id
@@ -50,6 +53,7 @@ COOKIE = "xapis_session"
 def create_app(data_dir=None, start_worker=True):
     store = Store(data_dir)
     queue = Queue(store)
+    chat_service = chat_adapter.ChatService(store)
     dummy_password = password_hash(secrets.token_urlsafe(32))
     os.environ.setdefault("X_REQUIRE_PROXY", "1")
     os.environ.setdefault("X_GATEWAY_URL", "http://127.0.0.1:8090")
@@ -105,7 +109,7 @@ def create_app(data_dir=None, start_worker=True):
                 "X-Frame-Options": "DENY",
                 "Referrer-Policy": "no-referrer",
                 "Cache-Control": "no-store",
-                "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://*.twimg.com data: blob:; media-src https://*.twimg.com blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                "Content-Security-Policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' https://*.twimg.com data: blob:; media-src https://*.twimg.com blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             }
         )
         return response
@@ -372,9 +376,14 @@ def create_app(data_dir=None, start_worker=True):
             409,
         )
         with store.connect(immediate=True) as db:
+            latest = db.execute("SELECT secret FROM accounts WHERE id=? FOR UPDATE", (account_id,)).fetchone()
+            prior_secret = store.decrypt(latest["secret"])
+            replacement = {"proxy": proxy}
+            if prior_secret.get("chat_pin"):
+                replacement["chat_pin"] = prior_secret["chat_pin"]
             db.execute(
                 "UPDATE accounts SET secret=?,status='pending',session_version=session_version+1 WHERE id=?",
-                (store.encrypt({"proxy": proxy}), account_id),
+                (store.encrypt(replacement), account_id),
             )
             db.execute("UPDATE rules SET enabled=0 WHERE account_id=?", (account_id,))
             db.execute(
@@ -610,6 +619,103 @@ def create_app(data_dir=None, start_worker=True):
         auth = X.auth_for(store, row)
         return X.discussion(XAPI.get_work_info(auth, post_id, cursor=cursor), post_id)
 
+    @app.get("/api/accounts/{account_id}/chat/inbox")
+    def chat_inbox(account_id: str, cursor: str | None = None, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        require(not cursor or len(cursor) <= 5000, "收件箱翻页游标过长")
+        auth = X.auth_for(store, account)
+        raw = XChatAPI.get_inbox_page(auth, chat_adapter.parse_cursor(cursor)) if cursor else XChatAPI.get_initial_chat_page(auth)
+        if not cursor:
+            chat_service.remember_metadata(account, raw)
+        return chat_adapter.inbox(raw, account["x_id"])
+
+    @app.get("/api/accounts/{account_id}/chat/status")
+    def chat_status(account_id: str, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        return {"has_saved_pin": bool(store.decrypt(account["secret"]).get("chat_pin")),
+                "send_supported": True, "can_write": policy.status(store, account)["can_write"]}
+
+    @app.get("/api/accounts/{account_id}/chat/recipient")
+    def chat_recipient(account_id: str, handle: str, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        handle = handle.lstrip("@").strip()
+        require(re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle), "请输入有效的 X 用户名")
+        person = X.profile(XAPI.get_user_info(X.auth_for(store, account), handle))
+        require(person, "未找到该聊天用户", 404)
+        ids = sorted({account["x_id"], person["x_id"]}, key=int)
+        cid = ":".join(ids if len(ids) == 2 else ids * 2)
+        return {"id": cid, "title": person["name"] or person["handle"],
+                "participant_ids": ids, "participants": [person], "events": []}
+
+    @app.get("/api/accounts/{account_id}/chat/public-keys")
+    def chat_public_keys(account_id: str, ids: str, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        user_ids = list(dict.fromkeys(ids.split(",")))
+        require(0 < len(user_ids) <= 100 and all(v.isascii() and v.isdigit() and len(v) <= 30 for v in user_ids), "聊天成员 ID 无效")
+        return chat_adapter.public_keys(XChatAPI.get_public_keys(X.auth_for(store, account), user_ids, include_juicebox_tokens=False))
+
+    @app.put("/api/accounts/{account_id}/chat/password")
+    def save_chat_password(account_id: str, body: M.ChatPassword, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        chat_service.save_pin(account, body.pin)
+        store.audit(user["user_id"], "chat.password.saved", account_id)
+        return {"has_saved_pin": True}
+
+    @app.delete("/api/accounts/{account_id}/chat/password")
+    def clear_chat_password(account_id: str, user=Depends(current)):
+        chat_service.save_pin(owned("accounts", account_id, user), None)
+        store.audit(user["user_id"], "chat.password.removed", account_id)
+        return {"has_saved_pin": False}
+
+    @app.get("/api/accounts/{account_id}/chat/conversations/{conversation_id}")
+    def chat_conversation(account_id: str, conversation_id: str, before: str | None = None,
+                          key_before: str | None = None, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        require(re.fullmatch(r"[a-zA-Z0-9:-]{1,200}", conversation_id), "会话 ID 无效")
+        for value in (before, key_before):
+            require(value is None or (value.isascii() and value.isdigit() and len(value) <= 20), "会话翻页游标无效")
+        payload = XChatAPI.get_conversation_page(X.auth_for(store, account), conversation_id,
+                    min_local_sequence_id=before or 9223372036854775807,
+                    min_conversation_key_version=key_before or 9223372036854775807)
+        return {"id": conversation_id, **chat_service.display_page(account, conversation_id, payload)}
+
+    @app.post("/api/accounts/{account_id}/chat/send")
+    def chat_send(account_id: str, body: M.ChatSend, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        policy.ensure_write(store, account)
+        auth = X.auth_for(store, account)
+        event = chat_service.dispatch(account, body.message_id, "send", body.model_dump(),
+                                      lambda: XChatAPI.send_message(auth, **body.model_dump()))
+        return {"accepted": True, "message_id": body.message_id, "events": [event]}
+
+    @app.post("/api/accounts/{account_id}/chat/conversation-keys")
+    def chat_setup_keys(account_id: str, body: M.ChatKeySetup, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        policy.ensure_write(store, account)
+        members = set(body.conversation_id.split(":"))
+        require(account["x_id"] in members and members == {p.user_id for p in body.conversation_participant_keys}, "会话成员与密钥接收者不一致")
+        auth = X.auth_for(store, account)
+        current_page = chat_adapter.conversation_page(XChatAPI.get_conversation_page(auth, body.conversation_id))
+        require(not current_page["events"] and not current_page["has_more"], "已有会话需要先读取并恢复原密钥，不能覆盖会话密钥", 409)
+        result = chat_service.dispatch(account, body.action_signatures[0].message_id, "keys", body.model_dump(),
+                                       lambda: XChatAPI.add_conversation_keys(auth, **body.model_dump()))
+        return {"confirmed": True, "sequence_id": result["conversation_key_change_sequence_id"]}
+
+    @app.post("/api/accounts/{account_id}/chat/unlock-context")
+    def chat_unlock_context(account_id: str, request: Request, user=Depends(current)):
+        account = owned("accounts", account_id, user)
+        throttle(request, "chat-unlock:" + account_id, 6)
+        return chat_service.context(account)
+
+    @app.post("/api/accounts/{account_id}/chat/relay")
+    def chat_relay(account_id: str, body: M.ChatRelay, user=Depends(current)):
+        return chat_service.relay(owned("accounts", account_id, user), body)
+
+    @app.delete("/api/accounts/{account_id}/chat/unlock-context/{context_id}")
+    def chat_lock(account_id: str, context_id: str, user=Depends(current)):
+        chat_service.discard(owned("accounts", account_id, user), context_id)
+        return {"ok": True}
+
     @app.post("/api/accounts/{account_id}/action")
     def action(account_id: str, body: M.Action, user=Depends(current)):
         row = owned("accounts", account_id, user)
@@ -650,7 +756,7 @@ def create_app(data_dir=None, start_worker=True):
             "reads": [
                 {"id": k, "label": v[2], "params": v[1]} for k, v in X.READS.items()
             ],
-            "dm_send": False,
+            "dm_send": True,
             "gateway": "go-tls-client" if os.getenv("X_GATEWAY_URL") else "curl_cffi",
             "proxy_required": True,
         }

@@ -169,7 +169,7 @@ def public_raw(value):
             k: public_raw(v)
             for k, v in value.items()
             if not any(
-                s in k.lower() for s in ("token", "cookie", "secret", "authorization")
+                s in k.lower() for s in ("token", "cookie", "secret", "authorization", "passcode", "private_key", "chat_pin")
             )
         }
     if isinstance(value, list):
