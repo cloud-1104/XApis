@@ -21,6 +21,21 @@
 - 图片、多图片和视频上传；X Chat 私信读取链路已封装。
 - 直接调用 Python SDK，也可以使用 `main.py` CLI。
 
+## 🖥️ Web 自动化运营台（Docker）
+
+现在可使用 X 风格的 Web 工作台管理账号、AI 写作、热点来源和自动发布。首位初始化用户为管理员；账号必须先绑定代理，再登录。MySQL 持久化，默认 4 天只读养护，前 7 天每天最多 2 篇；支持首页推荐时间线与关键词分组养护、随机分页浏览和 Cookie 自动同步。X 请求通过独立 Go TLS 网关与账号专属代理发送。
+
+```bash
+docker compose up -d --build --wait
+docker compose exec web python -m console.manage setup-token
+```
+
+打开 [http://localhost:8000](http://localhost:8000)，使用初始化令牌创建管理员，然后连接 X 账号与 OpenAI 兼容 AI 服务。
+
+支持时间线与自己的贴文、搜索、回复/引用/串文/长帖、媒体与文章、互动、草稿/定时发布、RSS/网页热点采集、AI 总结和自动化规则。已有 CLI 和 Python SDK 保留。
+
+完整部署、HTTPS、代理、本地 AI、备份和功能说明见 [控制台文档](docs/CONSOLE.md)。
+
 ## 🚀 快速开始
 
 ```bash
