@@ -16,6 +16,22 @@ export function keyPayload(prepared) {
         signing_public_key:s.messageEventSignature.signingPublicKey}}))};
 }
 
+// New one-to-one conversations require a usable identity key for both sides.
+// Keep all key versions for signature verification, but use the latest version
+// per member when preparing a new conversation key.
+export function newConversationKeys(conversationId, ownId, keys, hasMore = false) {
+  if (hasMore) throw new Error("会话尚有历史事件，请先恢复原会话密钥");
+  if (!/^\d+:\d+$/.test(conversationId)) throw new Error("群聊需要先恢复已有会话密钥");
+  const ids = [...new Set(conversationId.split(":"))];
+  if (!ids.includes(ownId)) throw new Error("会话成员与当前账号不一致");
+  const selected = ids.map(userId => {
+    const candidates = keys.filter(k => k.userId === userId && /^\d+$/.test(k.publicKeyVersion || "") && k.identityPublicKey && k.publicKey);
+    return candidates.reduce((latest, key) => !latest || BigInt(key.publicKeyVersion) > BigInt(latest.publicKeyVersion) ? key : latest, null);
+  });
+  if (!selected[ids.indexOf(ownId)]) throw new Error("当前账号缺少有效聊天公钥，请刷新 X 登录会话后重试");
+  return {ids, keys:selected.filter(Boolean), missingPeer:ids.some((id, i) => id !== ownId && !selected[i])};
+}
+
 // Some X conversations contain plaintext events without a verifiable signature.
 // Show only those messages as unverified; never import their keys or trust them
 // when preparing an encrypted send.

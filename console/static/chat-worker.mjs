@@ -1,5 +1,5 @@
 // Private keys are confined to this worker. Only display-ready messages leave it.
-import {sendPayload, keyPayload, messageView, decryptForDisplay} from "./chat-protocol.mjs";
+import {sendPayload, keyPayload, messageView, decryptForDisplay, newConversationKeys} from "./chat-protocol.mjs";
 import {plaintextPayload} from "./chat-plaintext.mjs";
 const nativeFetch = globalThis.fetch.bind(globalThis);
 let session = null, cryptoChat = null, context = null, busy = false, phase = "";
@@ -43,7 +43,7 @@ function errorMessage(error) {
   if (/InvalidAuth/.test(message)) return {code: "invalid_auth", message: "密钥恢复授权已失效，请刷新 X 登录会话后重试。"};
   if (/UpgradeRequired/.test(message)) return {code:"protocol_version",message:"密钥恢复协议版本不兼容，请更新聊天组件。"};
   if (/RateLimit/.test(message)) return {code: "rate_limit", message: "密钥服务暂时限流，请稍后手动重试。"};
-  if (/^X |^请|^聊天|^不允许|^账号|^会话|^群聊|^此会话/.test(message)) return {code: "chat_error", message: message.slice(0, 180)};
+  if (/^X |^请|^聊天|^不允许|^账号|^会话|^群聊|^此会话|^对方|^当前/.test(message)) return {code: "chat_error", message: message.slice(0, 180)};
   if (/Transient|fetch|network|relay/i.test(message)) return {code: "network", message: "聊天密钥服务连接失败，请检查账号代理；未自动重试密码。"};
   const diagnostic = message.replace(/[A-Za-z0-9+/_=.-]{24,}/g, "[redacted]").replace(/\b\d{4,}\b/g, "[value]").replace(/\[(?:\s*\d{1,3}\s*,){8,}[^\]]*\]/g, "[bytes]").slice(0, 220);
   return {code: "unlock_failed", message: "聊天解锁未完成，请检查密码、X 登录状态和代理。", diagnostic: `${phase} · ${error?.name || "Error"} · ${diagnostic}`};
@@ -98,18 +98,25 @@ self.onmessage = async ({data}) => {
       } finally { pin.fill(0); }
     } else if (data.type === "decrypt") {
       if (!cryptoChat) throw new Error("请先准备聊天会话");
-      await signingKeys(data.participants);
+      const members = /^\d+:\d+$/.test(data.conversation || "") ? data.conversation.split(":") : data.participants;
+      const keys = await signingKeys(members);
       const decoded = decryptForDisplay(cryptoChat, data.events || []);
       const event_types = decoded.messages.map(m => m.event?.type || "missing");
       const errors = Object.values(decoded.errors || {}).map(v => String(v).replace(/[A-Za-z0-9+/_=.-]{24,}/g, "[redacted]").replace(/\b\d{4,}\b/g, "[value]").slice(0, 160));
-      self.postMessage({id: data.id, result: {...messageView(decoded, data.page_events),
+      let missing_peer_key = false;
+      if (!(data.events || []).length && !data.hasMore && /^\d+:\d+$/.test(data.conversation || "")) {
+        try { missing_peer_key = newConversationKeys(data.conversation, context?.user_id || session.user_id, keys).missingPeer; }
+        catch { /* Sending performs the full validation and reports errors. */ }
+      }
+      self.postMessage({id: data.id, result: {...messageView(decoded, data.page_events), missing_peer_key,
         diagnostic: errors.length ? JSON.stringify({event_types, errors}) : ""}});
     } else if (data.type === "send") {
       if (!cryptoChat?.isUnlocked()) throw new Error("请先解锁聊天");
       const status = await api("status");
       if (!status.can_write) throw new Error("账号仍处于只读养护期，不能发送私信");
       if (typeof data.text !== "string" || !data.text.trim() || data.text.length > 10000) throw new Error("请输入 1–10000 字的聊天内容");
-      const keys = await signingKeys(data.participants);
+      const members = /^\d+:\d+$/.test(data.conversation) ? data.conversation.split(":") : data.participants;
+      const keys = await signingKeys(members);
       const page = await api("conversations/" + encodeURIComponent(data.conversation));
       let prepared = null;
       let plain = false;
@@ -125,14 +132,16 @@ self.onmessage = async ({data}) => {
           if (!plain && data.plaintext) throw new Error("会话加密状态已变化，请刷新会话后重试。");
           if (!plain && !encrypted) throw new Error("此会话尚未恢复已验证的加密密钥，请先在 X 中确认会话状态。");
         } else {
-          if (data.plaintext) throw new Error("会话状态已变化，请刷新会话后重试。");
-          if (page.has_more) throw new Error("会话尚有历史事件，请先恢复原会话密钥");
-          if (!/^\d+:\d+$/.test(data.conversation)) throw new Error("群聊需要先恢复已有会话密钥");
-          const ids = [...new Set(data.conversation.split(":"))];
-          if (!ids.includes(context.user_id) || ids.some(id => !keys.some(k => k.userId === id))) throw new Error("聊天成员尚未提供可用的加密公钥");
-          prepared = cryptoChat.prepareConversationKeyChange({conversationId:data.conversation,
-            publicKeys:keys.filter(k => ids.includes(k.userId)).map(k => ({userId:k.userId,publicKey:k.identityPublicKey,keyVersion:k.publicKeyVersion}))});
-          await api("conversation-keys", "POST", keyPayload(prepared));
+          const setup = newConversationKeys(data.conversation, context.user_id, keys, page.has_more);
+          if (setup.missingPeer) {
+            if (!data.plaintext) throw new Error("对方尚未提供加密聊天公钥，请刷新会话后选择未加密发送。");
+            plain = true;
+          } else {
+            if (data.plaintext) throw new Error("会话加密状态已变化，请刷新会话后重试。");
+            prepared = cryptoChat.prepareConversationKeyChange({conversationId:data.conversation,
+              publicKeys:setup.keys.map(k => ({userId:k.userId,publicKey:k.identityPublicKey,keyVersion:k.publicKeyVersion}))});
+            await api("conversation-keys", "POST", keyPayload(prepared));
+          }
         }
         const payload = plain ? plaintextPayload(cryptoChat,{conversationId:data.conversation, senderId:context.user_id,
           keyVersion:context.version, text:data.text}) : cryptoChat.encryptMessage({conversationId:data.conversation,text:data.text,

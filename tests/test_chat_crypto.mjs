@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {sendPayload,keyPayload,messageView,decryptForDisplay} from '../console/static/chat-protocol.mjs';
+import {sendPayload,keyPayload,messageView,decryptForDisplay,newConversationKeys} from '../console/static/chat-protocol.mjs';
 import {plaintextPayload} from '../console/static/chat-plaintext.mjs';
 import {createChat} from '../frontend/node_modules/@xdevplatform/chat-xdk/index.js';
 
@@ -118,4 +118,19 @@ test('plaintext send matches the captured v7 wire format and carries a valid sig
     assert.equal(decoded.verified,false);
     assert.throws(()=>plaintextPayload(chat,{conversationId:'123:999',senderId:'456',keyVersion:'1',text,messageId:id}));
   } finally { prepared.conversationKey.fill(0); chat.free(); }
+});
+
+test('new conversations distinguish missing peer keys from missing own keys',()=>{
+  const key=(userId,publicKeyVersion)=>({userId,publicKeyVersion,identityPublicKey:'identity',publicKey:'signing'});
+  const own=key('123','1');
+  const missing=newConversationKeys('123:456','123',[own]);
+  assert.equal(missing.missingPeer,true);
+  assert.deepEqual(missing.keys,[own]);
+  const peerOld=key('456','9'), peerNew=key('456','10');
+  const complete=newConversationKeys('123:456','123',[own,peerOld,peerNew]);
+  assert.equal(complete.missingPeer,false);
+  assert.deepEqual(complete.keys,[own,peerNew]);
+  assert.throws(()=>newConversationKeys('123:456','123',[peerNew]),/当前账号/);
+  assert.throws(()=>newConversationKeys('123:456','123',[own],true),/历史事件/);
+  assert.throws(()=>newConversationKeys('123:456','789',[own]),/当前账号/);
 });

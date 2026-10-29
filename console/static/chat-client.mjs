@@ -30,7 +30,7 @@ export class ChatVault {
   }
   unlock() { return this.request("unlock", {account: this.account, csrf: this.csrf}); }
   init(user_id) { return this.request("init", {account:this.account, csrf:this.csrf, user_id}); }
-  decrypt(events, participants, page_events) { return this.request("decrypt", {events, participants, page_events}); }
+  decrypt(events, participants, page_events, conversation, hasMore) { return this.request("decrypt", {events, participants, page_events, conversation, hasMore}); }
   send(conversation,text,participants,plaintext = false) { return this.request("send",{conversation,text,participants,plaintext}); }
   async lock() { try { await this.request("lock"); } finally { this.dispose(); } }
   dispose() { this.fail("聊天已锁定"); this.worker.terminate(); }

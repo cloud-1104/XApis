@@ -531,8 +531,9 @@ function renderChatThread() {
   const own = S.accounts.find(a => a.id === S.account)?.x_id;
   const sender = id => thread?.participants?.find(p => p.x_id === id)?.name || (id === own ? "我" : "聊天成员");
   const hasUnverifiedPlaintext = (c.messages || []).some(m => m.verified === false);
+  const plaintextMode = !!c.missing_peer_key || (hasUnverifiedPlaintext && !c.encrypted_ready);
   const canSend = c.unlocked && c.can_write && !c.sending && !c.threadLoading && !c.sendUncertain;
-  $("#chat-thread").innerHTML = `<div class="chat-thread"><div class="row between"><h3>${esc(thread?.title || "会话内容")}</h3><button class="text-btn" data-action="chat-thread-refresh" ${c.threadLoading || c.sending ? "disabled" : ""}>刷新消息</button></div>${c.has_more && c.before ? `<button class="secondary chat-more" data-action="chat-history" ${c.threadLoading || c.sending ? "disabled" : ""}>加载更早消息</button>` : ""}${c.threadLoading && !c.messages?.length ? loading() : ""}${c.threadError ? `<div class="notice">${esc(c.threadError)}</div>` : ""}${c.message_request_state === "Received" ? `<div class="notice">这是一条消息请求；如需接受请求，请在 X 中处理。</div>` : ""}<div class="chat-messages">${(c.messages || []).map(m => `<article class="chat-bubble ${m.sender_id === own ? "own" : ""}"><div class="tiny muted">${esc(sender(m.sender_id))} · ${date(m.created)}${m.verified === false ? " · 未加密，未验证" : ""}</div><p>${esc(m.text)}</p></article>`).join("") || (!c.threadLoading ? `<p class="chat-help">${c.system_event_count ? '聊天密钥和设置已同步，暂时还没有聊天消息。' : '暂时还没有聊天消息。'}</p>` : "")}</div>${c.failed_count ? `<p class="chat-help">${c.failed_count} 条事件未通过解密或签名校验。</p>` : ""}${c.diagnostic ? `<details class="chat-help"><summary>解密诊断</summary>${esc(c.diagnostic)}</details>` : ""}<form data-form="chat-send" class="chat-compose"><textarea id="chat-text" name="text" data-conversation="${esc(c.selected)}" aria-label="私信内容" placeholder="${!c.can_write ? "养护期只读，结束后可发送私信" : !c.unlocked ? "请先解锁聊天" : "写一条私信…"}" maxlength="10000" required ${!canSend ? "disabled" : ""}>${esc(c.draft || "")}</textarea>${c.sendError ? `<div class="form-error show">${esc(c.sendError)}</div>` : ""}${errorSlot()}<div class="row between"><span class="tiny muted">${c.sendNote ? esc(c.sendNote) : (hasUnverifiedPlaintext && !c.encrypted_ready ? "未加密消息 · 请勿发送敏感内容" : "端到端加密 · 文字消息")}</span><button class="primary" ${!canSend ? "disabled" : ""}>${c.sending ? "正在发送…" : hasUnverifiedPlaintext && !c.encrypted_ready ? "发送未加密私信" : "发送私信"}</button></div></form></div>`;
+  $("#chat-thread").innerHTML = `<div class="chat-thread"><div class="row between"><h3>${esc(thread?.title || "会话内容")}</h3><button class="text-btn" data-action="chat-thread-refresh" ${c.threadLoading || c.sending ? "disabled" : ""}>刷新消息</button></div>${c.has_more && c.before ? `<button class="secondary chat-more" data-action="chat-history" ${c.threadLoading || c.sending ? "disabled" : ""}>加载更早消息</button>` : ""}${c.threadLoading && !c.messages?.length ? loading() : ""}${c.threadError ? `<div class="notice">${esc(c.threadError)}</div>` : ""}${c.message_request_state === "Received" ? `<div class="notice">这是一条消息请求；如需接受请求，请在 X 中处理。</div>` : ""}<div class="chat-messages">${(c.messages || []).map(m => `<article class="chat-bubble ${m.sender_id === own ? "own" : ""}"><div class="tiny muted">${esc(sender(m.sender_id))} · ${date(m.created)}${m.verified === false ? " · 未加密，未验证" : ""}</div><p>${esc(m.text)}</p></article>`).join("") || (!c.threadLoading ? `<p class="chat-help">${c.system_event_count ? '聊天密钥和设置已同步，暂时还没有聊天消息。' : '暂时还没有聊天消息。'}</p>` : "")}</div>${c.failed_count ? `<p class="chat-help">${c.failed_count} 条事件未通过解密或签名校验。</p>` : ""}${c.diagnostic ? `<details class="chat-help"><summary>解密诊断</summary>${esc(c.diagnostic)}</details>` : ""}<form data-form="chat-send" class="chat-compose"><textarea id="chat-text" name="text" data-conversation="${esc(c.selected)}" aria-label="私信内容" placeholder="${!c.can_write ? "养护期只读，结束后可发送私信" : !c.unlocked ? "请先解锁聊天" : "写一条私信…"}" maxlength="10000" required ${!canSend ? "disabled" : ""}>${esc(c.draft || "")}</textarea>${c.sendError ? `<div class="form-error show">${esc(c.sendError)}</div>` : ""}${errorSlot()}<div class="row between"><span class="tiny muted">${c.sendNote ? esc(c.sendNote) : (plaintextMode ? "未加密消息 · 请勿发送敏感内容" : "端到端加密 · 文字消息")}</span><button class="primary" ${!canSend ? "disabled" : ""}>${c.sending ? "正在发送…" : plaintextMode ? "发送未加密私信" : "发送私信"}</button></div></form></div>`;
 }
 async function refreshChatInbox(more = false) {
   const c = S.chat, account = S.account;
@@ -580,7 +581,7 @@ async function openChatConversation(id, more = false) {
   const c = S.chat, account = S.account;
   if (!c || c.sending || c.threadLoading) return;
   const changed = c.selected !== id;
-  if (changed) Object.assign(c,{messages:[],draft:"",before:null,key_before:null,has_more:false,encrypted_ready:false,failed_count:0,system_event_count:0,message_request_state:null,sendError:"",sendUncertain:false,sendNote:"",diagnostic:""});
+  if (changed) Object.assign(c,{messages:[],draft:"",before:null,key_before:null,has_more:false,encrypted_ready:false,missing_peer_key:false,failed_count:0,system_event_count:0,message_request_state:null,sendError:"",sendUncertain:false,sendNote:"",diagnostic:""});
   c.selected = id; c.threadError = "";
   if (c.busy) { c.threadError = "正在恢复聊天密钥，请稍候。"; renderChatInbox(); return; }
   c.threadLoading = true;
@@ -599,7 +600,7 @@ async function openChatConversation(id, more = false) {
     const result = await api(`/accounts/${account}/chat/conversations/${encodeURIComponent(id)}?${params}`);
     if (S.chat !== c) return;
     const conversation = c.inbox?.conversations.find(t => t.id === id);
-    const decoded = await vault.decrypt(result.events, conversation?.participant_ids || [], result.page_events);
+    const decoded = await vault.decrypt(result.events, conversation?.participant_ids || [], result.page_events, id, result.has_more);
     if (S.chat !== c || c.selected !== id) return;
     const messages = [...new Map([...(c.messages || []),...decoded.messages].map(m => [m.id,m])).values()].sort((a,b) => (a.created || 0)-(b.created || 0));
     const prior = c.before;
@@ -617,7 +618,7 @@ async function sendChatMessage(text) {
   renderChatThread();
   try {
     const conversation = c.inbox?.conversations.find(t => t.id === c.selected);
-    const result = await vault.send(c.selected,text,conversation?.participant_ids || [], (c.messages || []).some(m => m.verified === false) && !c.encrypted_ready);
+    const result = await vault.send(c.selected,text,conversation?.participant_ids || [], (!!c.missing_peer_key || ((c.messages || []).some(m => m.verified === false) && !c.encrypted_ready)));
     if (S.chat !== c) return;
     c.messages = [...new Map([...(c.messages || []),...result.messages].map(m => [m.id,m])).values()];
     c.draft = ""; const field = $("#chat-text"); if (field) field.value = "";
