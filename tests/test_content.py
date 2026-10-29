@@ -209,6 +209,33 @@ def test_only_operator_allowlisted_ai_can_use_private_hosts(monkeypatch):
         target("http://other.local:8080/v1", True)
 
 
+def test_wildcard_allows_private_ai_but_not_sources(monkeypatch):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.86", 80))
+        ],
+    )
+    monkeypatch.setenv("CONSOLE_PRIVATE_AI_HOSTS", "*")
+    assert target("https://ai.example/v1", True)[3] == "198.18.0.86"
+    with pytest.raises(RemoteError):
+        target("https://ai.example/feed")
+
+
+def test_operator_can_allow_private_hosts_for_ai_and_sources(monkeypatch):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+        ],
+    )
+    monkeypatch.setenv("CONSOLE_ALLOW_PRIVATE_HOSTS", "1")
+    assert target("http://service.local/v1", True)[3] == "127.0.0.1"
+    assert target("http://service.local/feed")[3] == "127.0.0.1"
+
+
 def test_modern_ai_budget_and_manual_compatibility(admin, app, monkeypatch):
     monkeypatch.setattr("console.app.target", lambda *a, **k: None)
     seen = []

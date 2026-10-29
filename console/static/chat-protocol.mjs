@@ -15,6 +15,28 @@ export function keyPayload(prepared) {
         signature_version:s.messageEventSignature.signatureVersion,signature:s.messageEventSignature.signature,
         signing_public_key:s.messageEventSignature.signingPublicKey}}))};
 }
+
+// Some X conversations contain plaintext events without a verifiable signature.
+// Show only those messages as unverified; never import their keys or trust them
+// when preparing an encrypted send.
+export function decryptForDisplay(chat, events) {
+  const decoded = chat.decryptEvents({events});
+  const errors = {...decoded.errors};
+  const messages = [...decoded.messages];
+  chat.setRejectUnverified(false);
+  try {
+    for (const index of Object.keys(errors)) {
+      try {
+        const event = chat.decryptEvent({eventB64:events[Number(index)]});
+        if (event.type === "message" && event.verified === false && !event.conversationKeyVersion) {
+          messages.push({originalB64:events[Number(index)], event});
+          delete errors[index];
+        }
+      } catch { /* Keep the original validation error. */ }
+    }
+  } finally { chat.setRejectUnverified(true); }
+  return {...decoded, messages, errors};
+}
 export function messageView(decoded, pageEvents = null) {
   const events = decoded.messages.map(m => m.event);
   const pageSet = pageEvents ? new Set(pageEvents) : null;
@@ -24,6 +46,8 @@ export function messageView(decoded, pageEvents = null) {
     id:e.id || e.sequenceId, sequence:e.sequenceId, sender_id:e.senderId,
     text:e.content?.text || e.content?.newText || "[附件或其他消息类型]",
     created:e.createdAtMsec ? e.createdAtMsec/1000 : null, verified:e.verified,
+    encrypted:!!e.conversationKeyVersion,
   })), before:minimum(cursorEvents.map(e => e.sequenceId)), key_before:minimum(events.filter(e => e.type === "keyChange").map(e => e.conversationKeyVersion)),
+    encrypted_ready:events.some(e => (e.type === "keyChange" || (e.type === "message" && e.conversationKeyVersion)) && e.verified === true),
     failed_count:Object.keys(decoded.errors || {}).length};
 }

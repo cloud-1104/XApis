@@ -1,5 +1,6 @@
 // Private keys are confined to this worker. Only display-ready messages leave it.
-import {sendPayload, keyPayload, messageView} from "./chat-protocol.mjs";
+import {sendPayload, keyPayload, messageView, decryptForDisplay} from "./chat-protocol.mjs";
+import {plaintextPayload} from "./chat-plaintext.mjs";
 const nativeFetch = globalThis.fetch.bind(globalThis);
 let session = null, cryptoChat = null, context = null, busy = false, phase = "";
 const toBase64 = bytes => {
@@ -42,14 +43,14 @@ function errorMessage(error) {
   if (/InvalidAuth/.test(message)) return {code: "invalid_auth", message: "密钥恢复授权已失效，请刷新 X 登录会话后重试。"};
   if (/UpgradeRequired/.test(message)) return {code:"protocol_version",message:"密钥恢复协议版本不兼容，请更新聊天组件。"};
   if (/RateLimit/.test(message)) return {code: "rate_limit", message: "密钥服务暂时限流，请稍后手动重试。"};
-  if (/^X |^请|^聊天|^不允许|^账号|^会话|^群聊/.test(message)) return {code: "chat_error", message: message.slice(0, 180)};
+  if (/^X |^请|^聊天|^不允许|^账号|^会话|^群聊|^此会话/.test(message)) return {code: "chat_error", message: message.slice(0, 180)};
   if (/Transient|fetch|network|relay/i.test(message)) return {code: "network", message: "聊天密钥服务连接失败，请检查账号代理；未自动重试密码。"};
   const diagnostic = message.replace(/[A-Za-z0-9+/_=.-]{24,}/g, "[redacted]").replace(/\b\d{4,}\b/g, "[value]").replace(/\[(?:\s*\d{1,3}\s*,){8,}[^\]]*\]/g, "[bytes]").slice(0, 220);
   return {code: "unlock_failed", message: "聊天解锁未完成，请检查密码、X 登录状态和代理。", diagnostic: `${phase} · ${error?.name || "Error"} · ${diagnostic}`};
 }
 
 async function signingKeys(participants) {
-  const ids = [...new Set([context.user_id, ...(participants || [])])].filter(id => /^\d{1,30}$/.test(id)).slice(0,100);
+  const ids = [...new Set([context?.user_id || session.user_id, ...(participants || [])])].filter(id => /^\d{1,30}$/.test(id)).slice(0,100);
   const keys = await api("public-keys?ids=" + encodeURIComponent(ids.join(",")));
   cryptoChat.setSigningKeys(keys);
   return keys;
@@ -58,8 +59,15 @@ async function signingKeys(participants) {
 self.onmessage = async ({data}) => {
   if (busy) { self.postMessage({id: data.id, error: {message: "正在处理上一个聊天步骤"}}); return; }
   busy = true;
+  let sendDispatched = false;
   try {
-    if (data.type === "unlock") {
+    if (data.type === "init") {
+      session = {account:data.account, csrf:data.csrf, user_id:data.user_id};
+      const {createChat} = await import("./vendor/chat-sdk.mjs");
+      cryptoChat = await createChat({getAuthToken: async () => { throw new Error("请先解锁聊天"); }});
+      cryptoChat.setRejectUnverified(true);
+      self.postMessage({id:data.id, result:{ready:true}});
+    } else if (data.type === "unlock") {
       session = {account: data.account, csrf: data.csrf};
       phase = "读取密钥配置";
       self.postMessage({progress: "正在读取聊天密钥备份配置"});
@@ -89,9 +97,9 @@ self.onmessage = async ({data}) => {
         self.postMessage({id: data.id, result: {unlocked: cryptoChat.isUnlocked(), context_id: context.context_id}});
       } finally { pin.fill(0); }
     } else if (data.type === "decrypt") {
-      if (!cryptoChat?.isUnlocked()) throw new Error("请先解锁聊天");
+      if (!cryptoChat) throw new Error("请先准备聊天会话");
       await signingKeys(data.participants);
-      const decoded = cryptoChat.decryptEvents({events:data.events || []});
+      const decoded = decryptForDisplay(cryptoChat, data.events || []);
       const event_types = decoded.messages.map(m => m.event?.type || "missing");
       const errors = Object.values(decoded.errors || {}).map(v => String(v).replace(/[A-Za-z0-9+/_=.-]{24,}/g, "[redacted]").replace(/\b\d{4,}\b/g, "[value]").slice(0, 160));
       self.postMessage({id: data.id, result: {...messageView(decoded, data.page_events),
@@ -104,11 +112,20 @@ self.onmessage = async ({data}) => {
       const keys = await signingKeys(data.participants);
       const page = await api("conversations/" + encodeURIComponent(data.conversation));
       let prepared = null;
+      let plain = false;
       try {
         if (page.events.length) {
-          const decoded = cryptoChat.decryptEvents({events:page.events});
-          if (Object.keys(decoded.errors || {}).length) throw new Error("会话事件未通过完整验证，请先刷新会话核对，暂不发送");
+          const decoded = decryptForDisplay(cryptoChat, page.events);
+          if (Object.keys(decoded.errors || {}).length) {
+            throw new Error("会话事件未通过完整验证，请先刷新会话核对，暂不发送");
+          }
+          const encrypted = decoded.messages.some(m => m.event.verified === true && (m.event.type === "keyChange" || (m.event.type === "message" && m.event.conversationKeyVersion)));
+          plain = decoded.messages.some(m => m.event.type === "message" && m.event.verified === false && !m.event.conversationKeyVersion) && !encrypted;
+          if (plain && !data.plaintext) throw new Error("此会话当前使用未加密消息，请确认发送方式后重试。");
+          if (!plain && data.plaintext) throw new Error("会话加密状态已变化，请刷新会话后重试。");
+          if (!plain && !encrypted) throw new Error("此会话尚未恢复已验证的加密密钥，请先在 X 中确认会话状态。");
         } else {
+          if (data.plaintext) throw new Error("会话状态已变化，请刷新会话后重试。");
           if (page.has_more) throw new Error("会话尚有历史事件，请先恢复原会话密钥");
           if (!/^\d+:\d+$/.test(data.conversation)) throw new Error("群聊需要先恢复已有会话密钥");
           const ids = [...new Set(data.conversation.split(":"))];
@@ -117,10 +134,12 @@ self.onmessage = async ({data}) => {
             publicKeys:keys.filter(k => ids.includes(k.userId)).map(k => ({userId:k.userId,publicKey:k.identityPublicKey,keyVersion:k.publicKeyVersion}))});
           await api("conversation-keys", "POST", keyPayload(prepared));
         }
-        const payload = cryptoChat.encryptMessage({conversationId:data.conversation,text:data.text,
+        const payload = plain ? plaintextPayload(cryptoChat,{conversationId:data.conversation, senderId:context.user_id,
+          keyVersion:context.version, text:data.text}) : cryptoChat.encryptMessage({conversationId:data.conversation,text:data.text,
           ...(prepared ? {conversationKey:prepared.conversationKey,conversationKeyVersion:prepared.conversationKeyVersion} : {})});
+        sendDispatched = true;
         const result = await api("send", "POST", sendPayload(data.conversation,payload));
-        const decoded = {messages:result.events.map(eventB64 => ({originalB64:eventB64,
+        const decoded = plain ? decryptForDisplay(cryptoChat,result.events) : {messages:result.events.map(eventB64 => ({originalB64:eventB64,
           event:cryptoChat.decryptEvent({eventB64,
             ...(prepared ? {conversationKeys:{[prepared.conversationKeyVersion]:prepared.conversationKey}} : {})})})),errors:{}};
         const failure = decoded.messages.find(m => m.event.type === "failure");
@@ -141,6 +160,6 @@ self.onmessage = async ({data}) => {
       if (context) await api("unlock-context/" + context.context_id, "DELETE").catch(() => {});
       context = null;
     }
-    self.postMessage({id: data.id, error: errorMessage(error)});
+    self.postMessage({id: data.id, error: {...errorMessage(error), send_uncertain:sendDispatched}});
   } finally { busy = false; }
 };

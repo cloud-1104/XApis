@@ -30,7 +30,9 @@ def target(url, allow_private=False):
         for s in os.getenv("CONSOLE_PRIVATE_AI_HOSTS", "").split(",")
         if s.strip()
     }
-    private_ok = allow_private and host.lower() in allowed
+    private_ok = os.getenv("CONSOLE_ALLOW_PRIVATE_HOSTS", "0") == "1" or (
+        allow_private and ("*" in allowed or host.lower() in allowed)
+    )
     try:
         addresses = {
             item[4][0]
