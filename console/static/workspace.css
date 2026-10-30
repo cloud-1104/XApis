@@ -351,3 +351,22 @@ dialog::backdrop { background: #26374666; backdrop-filter: blur(3px); }
   outline-offset: 3px;
 }
 .chat-compose textarea:disabled { background: #f6f8fa; color: var(--muted); }
+
+.chat-security-details { padding: 14px 18px; }
+.chat-security-details summary { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
+.chat-security-details summary svg { width: 18px; height: 18px; }
+.chat-layout { display: grid; grid-template-columns: minmax(240px, 32%) minmax(0, 1fr); padding: 0; min-height: min(680px, 70vh); overflow: hidden; }
+.chat-sidebar { padding: 22px; border-right: 1px solid var(--line); min-width: 0; }
+.chat-main { min-width: 0; display: flex; }
+.chat-placeholder { margin: auto; text-align: center; padding: 32px; color: var(--muted); }
+.chat-placeholder svg { width: 32px; height: 32px; margin-bottom: 12px; }
+.chat-placeholder h3 { color: var(--text); margin-bottom: 8px; }
+.chat-thread { border: 0; margin: 0; padding: 22px; display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.chat-messages { flex: 1; }
+.chat-compose { margin-top: auto; padding-top: 16px; }
+@media (max-width: 700px) {
+  .chat-layout { grid-template-columns: minmax(0, 1fr); }
+  .chat-sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+  .chat-conversation-list { max-height: 240px; overflow: auto; }
+  .chat-main { min-height: 360px; }
+}

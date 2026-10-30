@@ -433,9 +433,9 @@ def test_web_send_uses_signed_ciphertext_and_checks_confirmation(monkeypatch):
     )
     assert XChatAPI.send_message(auth, **send_payload()) == "ZXZlbnQ="
     assert "/SendMessageCreateMutation" in calls[0][0][0]
-    assert (
-        calls[0][1]["json"]["variables"]["message_id"] == send_payload()["message_id"]
-    )
+    variables = calls[0][1]["json"]["variables"]
+    assert isinstance(variables, str)
+    assert json.loads(variables) == {**send_payload(), "conversation_token": None}
     response.json = lambda: {"data": {"xchat_send_create_message_event": {}}}
     with pytest.raises(RuntimeError):
         XChatAPI.send_message(auth, **send_payload())

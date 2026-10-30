@@ -196,7 +196,8 @@ class XChatAPI:
                      'conversation_token': conversation_token,
                      'encoded_message_create_event': encoded_message_create_event,
                      'encoded_message_event_signature': encoded_message_event_signature}
-        result = XChatAPI._mutate(auth, SEND_CREATE_QID, 'SendMessageCreateMutation', variables)
+        result = XChatAPI._mutate(auth, SEND_CREATE_QID, 'SendMessageCreateMutation', variables,
+                                  encoded_variables=True)
         event = (result.get('data') or {}).get('xchat_send_create_message_event') or {}
         if not event.get('encoded_message_event'):
             raise RuntimeError('X Chat 未返回发送确认事件，请先核对会话，不能重复发送')
@@ -218,11 +219,11 @@ class XChatAPI:
         return event
 
     @staticmethod
-    def _mutate(auth, query_id, operation, variables):
+    def _mutate(auth, query_id, operation, variables, *, encoded_variables=False):
         path = f'/graphql/{query_id}/{operation}'
         resp = client.post(f'{XCHAT_ORIGIN}{path}',
                            headers=_external_headers(auth, path, content_type='application/json'),
-                           cookies=auth.cookie, json={'variables': variables},
+                           cookies=auth.cookie, json={'variables': _compact(variables) if encoded_variables else variables},
                            proxies=auth.proxies, timeout=30)
         return _checked(resp, operation)
 
